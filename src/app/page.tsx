@@ -7,66 +7,64 @@ import ScoreGauge from "@/components/ScoreGauge";
 import TalkingPoints from "@/components/TalkingPoints";
 import SessionStats from "@/components/SessionStats";
 import { GitHubContext } from "@/lib/githubContext";
-import { detectHedges, highlightHedges } from "@/lib/hedgeDetector";
-import { useSpeechRecognition } from "@/hooks/useSpeechRecognition";
+import { detectHedges } from "@/lib/hedgeDetector";
+import { useDeepgramTranscription, TranscriptChunk } from "@/hooks/useDeepgramTranscription";
 import { TalkingPoint } from "@/app/api/analyze/route";
 
 const INITIAL_SCORE = 85;
-const ANALYSIS_INTERVAL_MS = 15000; // 15 seconds
+const ANALYSIS_INTERVAL_MS = 15000;
 
 export default function Home() {
   const [githubContext, setGithubContext] = useState<GitHubContext | null>(null);
+  const [selectedDeviceId, setSelectedDeviceId] = useState<string>("");
   const [score, setScore] = useState(INITIAL_SCORE);
   const [scoreHistory, setScoreHistory] = useState<number[]>([INITIAL_SCORE]);
   const [totalHedges, setTotalHedges] = useState(0);
   const [talkingPoints, setTalkingPoints] = useState<TalkingPoint[]>([]);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
-  const [transcriptHtml, setTranscriptHtml] = useState("");
+  const [chunks, setChunks] = useState<TranscriptChunk[]>([]);
   const [durationSeconds, setDurationSeconds] = useState(0);
   const [sessionActive, setSessionActive] = useState(false);
 
-  // Buffer of recent transcript chunks for analysis
-  const recentChunksRef = useRef<string>("");
+  // Accumulate recent transcript for OpenAI analysis (labeled: YOU/THEM)
+  const recentBufferRef = useRef<string>("");
   const analysisTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const durationTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // Called on every finalized speech chunk
-  const handleFinalChunk = useCallback(
-    (chunk: string) => {
-      // 1. Instant hedge detection (no API, no latency)
-      const { hedges, scoreDelta } = detectHedges(chunk);
-
-      if (hedges.length > 0 || scoreDelta !== 0) {
+  const handleChunk = useCallback((chunk: TranscriptChunk) => {
+    // 1. Instant hedge detection — only on YOUR speech
+    if (chunk.speaker === "you") {
+      const { hedges, scoreDelta } = detectHedges(chunk.text);
+      if (hedges.length > 0) {
         setTotalHedges((prev) => prev + hedges.length);
+      }
+      if (scoreDelta !== 0) {
         setScore((prev) => Math.max(0, Math.min(100, prev + scoreDelta)));
       }
+    }
 
-      // 2. Highlight hedges in the transcript HTML
-      const highlighted = highlightHedges(chunk);
-      setTranscriptHtml((prev) => prev + highlighted);
+    // 2. Append to rendered transcript
+    setChunks((prev) => [...prev, chunk]);
 
-      // 3. Accumulate for Claude analysis
-      recentChunksRef.current += " " + chunk;
-    },
-    []
-  );
+    // 3. Accumulate labeled text for OpenAI analysis
+    const label = chunk.speaker === "you" ? "YOU" : "THEM";
+    recentBufferRef.current += `${label}: ${chunk.text}\n`;
+  }, []);
 
-  const { transcript: _transcript, interimText, isListening, error, start, stop, reset } =
-    useSpeechRecognition(handleFinalChunk);
+  const { isListening, error, start, stop } = useDeepgramTranscription(handleChunk);
 
-  // Trigger AI analysis every ANALYSIS_INTERVAL_MS
   const runAnalysis = useCallback(async () => {
-    const chunk = recentChunksRef.current.trim();
-    if (!chunk || !githubContext) return;
+    const buffer = recentBufferRef.current.trim();
+    if (!buffer || !githubContext) return;
 
-    recentChunksRef.current = ""; // reset buffer
+    recentBufferRef.current = "";
     setIsAnalyzing(true);
 
     try {
       const res = await fetch("/api/analyze", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ transcript: chunk, githubContext }),
+        body: JSON.stringify({ transcript: buffer, githubContext }),
       });
 
       if (res.ok) {
@@ -83,7 +81,7 @@ export default function Home() {
         }
       }
     } catch {
-      // Silent fail — analysis is non-critical
+      // Silent fail — non-critical
     } finally {
       setIsAnalyzing(false);
     }
@@ -95,15 +93,12 @@ export default function Home() {
     setScoreHistory([INITIAL_SCORE]);
     setTotalHedges(0);
     setTalkingPoints([]);
-    setTranscriptHtml("");
+    setChunks([]);
     setDurationSeconds(0);
-    recentChunksRef.current = "";
-    reset();
-    start();
+    recentBufferRef.current = "";
+    start(selectedDeviceId || undefined);
 
-    // Analysis interval
     analysisTimerRef.current = setInterval(runAnalysis, ANALYSIS_INTERVAL_MS);
-    // Duration counter
     durationTimerRef.current = setInterval(
       () => setDurationSeconds((s) => s + 1),
       1000
@@ -115,11 +110,9 @@ export default function Home() {
     setSessionActive(false);
     if (analysisTimerRef.current) clearInterval(analysisTimerRef.current);
     if (durationTimerRef.current) clearInterval(durationTimerRef.current);
-    // Run one final analysis
-    runAnalysis();
+    runAnalysis(); // final analysis
   }
 
-  // Clean up on unmount
   useEffect(() => {
     return () => {
       if (analysisTimerRef.current) clearInterval(analysisTimerRef.current);
@@ -128,7 +121,14 @@ export default function Home() {
   }, []);
 
   if (!githubContext) {
-    return <SetupPanel onReady={setGithubContext} />;
+    return (
+      <SetupPanel
+        onReady={(ctx, deviceId) => {
+          setGithubContext(ctx);
+          setSelectedDeviceId(deviceId);
+        }}
+      />
+    );
   }
 
   return (
@@ -143,8 +143,14 @@ export default function Home() {
             The Negotiator
           </span>
           {sessionActive && isListening && (
-            <span className="flex items-center gap-1.5 text-xs font-semibold" style={{ color: "var(--red)" }}>
-              <span className="live-dot inline-block w-2 h-2 rounded-full" style={{ background: "var(--red)" }} />
+            <span
+              className="flex items-center gap-1.5 text-xs font-semibold"
+              style={{ color: "var(--red)" }}
+            >
+              <span
+                className="live-dot inline-block w-2 h-2 rounded-full"
+                style={{ background: "var(--red)" }}
+              />
               LIVE
             </span>
           )}
@@ -158,9 +164,13 @@ export default function Home() {
             onClick={sessionActive ? stopSession : startSession}
             className="px-4 py-2 rounded-lg text-sm font-semibold transition-all"
             style={{
-              background: sessionActive ? "rgba(255,68,68,0.15)" : "var(--blue)",
+              background: sessionActive
+                ? "rgba(255,68,68,0.15)"
+                : "var(--blue)",
               color: sessionActive ? "var(--red)" : "white",
-              border: sessionActive ? "1px solid rgba(255,68,68,0.4)" : "none",
+              border: sessionActive
+                ? "1px solid rgba(255,68,68,0.4)"
+                : "none",
             }}
           >
             {sessionActive ? "Stop Session" : "Start Meeting"}
@@ -172,7 +182,11 @@ export default function Home() {
       {error && (
         <div
           className="px-4 py-2 rounded-lg text-sm"
-          style={{ background: "rgba(255,68,68,0.1)", color: "var(--red)", border: "1px solid rgba(255,68,68,0.3)" }}
+          style={{
+            background: "rgba(255,68,68,0.1)",
+            color: "var(--red)",
+            border: "1px solid rgba(255,68,68,0.3)",
+          }}
         >
           {error}
         </div>
@@ -182,26 +196,18 @@ export default function Home() {
       <div className="grid gap-4" style={{ gridTemplateColumns: "1fr 280px" }}>
         {/* Left column */}
         <div className="flex flex-col gap-4">
-          {/* Transcript */}
-          <div>
-            <div className="text-xs font-semibold uppercase tracking-widest mb-2" style={{ color: "var(--muted)" }}>
-              Live Transcript
-            </div>
-            <TranscriptPanel html={transcriptHtml} interimText={interimText} />
-          </div>
-
-          {/* Talking points */}
-          <div>
-            <TalkingPoints points={talkingPoints} isLoading={isAnalyzing} />
-          </div>
+          <TranscriptPanel chunks={chunks} />
+          <TalkingPoints points={talkingPoints} isLoading={isAnalyzing} />
         </div>
 
-        {/* Right column — score */}
+        {/* Right column */}
         <div className="flex flex-col gap-4">
-          {/* Score gauge */}
           <div
             className="rounded-lg"
-            style={{ background: "var(--surface)", border: "1px solid var(--border)" }}
+            style={{
+              background: "var(--surface)",
+              border: "1px solid var(--border)",
+            }}
           >
             <ScoreGauge score={score} />
           </div>
@@ -209,9 +215,15 @@ export default function Home() {
           {/* GitHub context summary */}
           <div
             className="rounded-lg p-4"
-            style={{ background: "var(--surface)", border: "1px solid var(--border)" }}
+            style={{
+              background: "var(--surface)",
+              border: "1px solid var(--border)",
+            }}
           >
-            <div className="text-xs font-semibold uppercase tracking-widest mb-3" style={{ color: "var(--muted)" }}>
+            <div
+              className="text-xs font-semibold uppercase tracking-widest mb-3"
+              style={{ color: "var(--muted)" }}
+            >
               GitHub Context
             </div>
             <div className="space-y-2">
@@ -221,7 +233,11 @@ export default function Home() {
                     <span
                       key={lang}
                       className="px-2 py-0.5 rounded text-xs"
-                      style={{ background: "rgba(68,136,255,0.1)", color: "var(--blue)", border: "1px solid rgba(68,136,255,0.2)" }}
+                      style={{
+                        background: "rgba(68,136,255,0.1)",
+                        color: "var(--blue)",
+                        border: "1px solid rgba(68,136,255,0.2)",
+                      }}
                     >
                       {lang}
                     </span>
@@ -233,9 +249,16 @@ export default function Home() {
               </div>
               <div className="space-y-1.5 mt-2">
                 {githubContext.repos.slice(0, 3).map((repo) => (
-                  <div key={repo.name} className="text-xs" style={{ color: "var(--muted)" }}>
-                    <span style={{ color: "var(--text)", fontWeight: 500 }}>{repo.name}</span>
-                    {repo.description && ` · ${repo.description.slice(0, 40)}`}
+                  <div
+                    key={repo.name}
+                    className="text-xs"
+                    style={{ color: "var(--muted)" }}
+                  >
+                    <span style={{ color: "var(--text)", fontWeight: 500 }}>
+                      {repo.name}
+                    </span>
+                    {repo.description &&
+                      ` · ${repo.description.slice(0, 40)}`}
                   </div>
                 ))}
               </div>

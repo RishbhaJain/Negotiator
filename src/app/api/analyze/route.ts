@@ -57,18 +57,20 @@ export async function POST(req: NextRequest) {
         role: "system",
         content:
           "You are a real-time pitch coach for high-stakes meetings (founders pitching VCs, PMs pitching stakeholders). " +
-          "Analyze the speaker's recent transcript for confidence and self-advocacy. " +
+          "The transcript uses speaker labels: YOU = the founder/pitcher, THEM = the interviewer/VC. " +
+          "Only analyze YOU lines for hedging and confidence scoring. " +
+          "Use THEM lines (questions/comments) as context to generate relevant talking points from the founder's GitHub work. " +
           "Return ONLY valid JSON with these fields: " +
-          "hedges (array of hedging phrases found), " +
-          "scoreDelta (integer: negative if weak, positive if confident, range -20 to +10), " +
+          "hedges (array of hedging phrases found in YOU lines only), " +
+          "scoreDelta (integer based on YOU lines only: negative if weak, positive if confident, range -20 to +10), " +
           "talkingPoints (array of 1-2 objects with trigger, point, source fields — " +
-          "grounded in their actual GitHub work, specific and actionable, max 25 words each).",
+          "grounded in their actual GitHub work, triggered by THEM questions, specific and actionable, max 25 words each).",
       },
       {
         role: "user",
         content:
           `GitHub context: ${JSON.stringify(contextSummary)}\n\n` +
-          `Recent transcript (last ~15 seconds): "${transcript}"\n\n` +
+          `Recent transcript (YOU = founder, THEM = VC/interviewer):\n${transcript}\n\n` +
           `Return JSON: { "hedges": string[], "scoreDelta": number, "talkingPoints": [{"trigger": string, "point": string, "source": string}] }`,
       },
     ],
