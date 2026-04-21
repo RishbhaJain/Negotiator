@@ -1,0 +1,60 @@
+name: Claude Feature Pipeline
+
+on:
+  issues:
+    types: [labeled]
+
+jobs:
+  claude-feature:
+    if: github.event.label.name == 'feature'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      id-token: write
+      actions: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run Claude Feature Pipeline
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_args: '--dangerously-skip-permissions'
+          additional_permissions: |
+            actions: read
+          prompt: |
+            You are a full-stack product and engineering team. A new feature request has been labeled.
+
+            Issue Title: ${{ github.event.issue.title }}
+            Issue Body: ${{ github.event.issue.body }}
+            Issue Number: #${{ github.event.issue.number }}
+            Issue URL: ${{ github.event.issue.html_url }}
+
+            Follow these three steps in order:
+
+            ## Step 1: PM Agent — Product Requirements
+            Write a concise PRD and post it as a comment on issue #${{ github.event.issue.number }}:
+            - Problem statement (1-2 sentences)
+            - User stories (as a [user], I want [action] so that [benefit])
+            - Acceptance criteria (bullet list)
+            - Out of scope
+
+            ## Step 2: Engineering Agent — Stories
+            Break the PRD into engineering tasks and post as a second comment on issue #${{ github.event.issue.number }}:
+            - Each task should be one focused PR
+            - Include which files to create/modify
+            - Include the technical approach
+
+            ## Step 3: Builder Agent — Implementation
+            For each engineering task:
+            1. Read the existing codebase to understand patterns and conventions
+            2. Create a branch named feature/issue-${{ github.event.issue.number }}-[short-description]
+            3. Implement the changes
+            4. Open a PR referencing issue #${{ github.event.issue.number }} — do NOT merge it
+
+            Be thorough but concise. Match the existing code style exactly.
