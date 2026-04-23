@@ -13,6 +13,7 @@ export interface TalkingPoint {
   trigger: string;
   point: string;
   source: string;
+  pinned?: boolean;
 }
 
 export interface AnalyzeResponse {

@@ -107,7 +107,10 @@ export default function Home() {
           });
         }
         if (Array.isArray(data.talkingPoints)) {
-          setTalkingPoints(data.talkingPoints);
+          setTalkingPoints((prev) => {
+            const pinned = prev.filter((p) => p.pinned);
+            return [...pinned, ...data.talkingPoints];
+          });
         }
       } else {
         console.error("analyze: HTTP", res.status, await res.text());
@@ -127,6 +130,14 @@ export default function Home() {
       runAnalysisRef.current();
     }, THEM_SILENCE_MS);
   };
+
+  function handleTogglePin(index: number) {
+    setTalkingPoints((prev) =>
+      prev[index]?.pinned
+        ? prev.filter((_, i) => i !== index)
+        : prev.map((pt, i) => (i === index ? { ...pt, pinned: true } : pt))
+    );
+  }
 
   function startSession() {
     setSessionActive(true);
@@ -243,7 +254,7 @@ export default function Home() {
             </p>
           )}
           <TranscriptPanel chunks={chunks} activeSpeaker={sessionActive ? activeSpeaker : undefined} onToggleSpeaker={sessionActive ? () => setActiveSpeaker((prev) => prev === "you" ? "them" : "you") : undefined} />
-          <TalkingPoints points={talkingPoints} isLoading={isAnalyzing} />
+          <TalkingPoints points={talkingPoints} isLoading={isAnalyzing} onTogglePin={handleTogglePin} />
         </div>
 
         {/* Right column */}
