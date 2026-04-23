@@ -5,9 +5,11 @@ import { TranscriptChunk } from "@/hooks/useDeepgramTranscription";
 
 interface Props {
   chunks: TranscriptChunk[];
+  activeSpeaker?: "you" | "them";
+  onToggleSpeaker?: () => void;
 }
 
-export default function TranscriptPanel({ chunks }: Props) {
+export default function TranscriptPanel({ chunks, activeSpeaker, onToggleSpeaker }: Props) {
   const youBottomRef = useRef<HTMLDivElement>(null);
   const themBottomRef = useRef<HTMLDivElement>(null);
 
@@ -27,6 +29,7 @@ export default function TranscriptPanel({ chunks }: Props) {
     const accentColor = speaker === "you" ? "var(--text)" : "var(--blue)";
     const headerColor = speaker === "you" ? "var(--green)" : "var(--blue)";
     const label = speaker === "you" ? "YOU" : "THEM";
+    const isActive = activeSpeaker === speaker;
 
     return (
       <div
@@ -39,14 +42,20 @@ export default function TranscriptPanel({ chunks }: Props) {
         {/* Column header */}
         <div
           className="px-3 py-2 text-xs font-semibold uppercase tracking-widest flex items-center gap-2"
+          onClick={onToggleSpeaker}
           style={{
             borderBottom: "1px solid var(--border)",
             color: headerColor,
+            cursor: onToggleSpeaker ? "pointer" : "default",
           }}
         >
           <span
             className="inline-block w-1.5 h-1.5 rounded-full"
-            style={{ background: headerColor }}
+            style={{
+              background: headerColor,
+              opacity: isActive ? 1 : 0.3,
+              boxShadow: isActive ? `0 0 4px ${headerColor}` : "none",
+            }}
           />
           {label}
           {speaker === "you" && (

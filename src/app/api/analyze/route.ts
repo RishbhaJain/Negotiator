@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
-import OpenAI from "openai";
+import Anthropic from "@anthropic-ai/sdk";
 import { GitHubContext } from "@/lib/githubContext";
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
 export interface AnalyzeRequest {
   transcript: string;
@@ -33,7 +33,6 @@ export async function POST(req: NextRequest) {
     });
   }
 
-  // Build a compact context summary to keep tokens low
   const contextSummary = {
     username: githubContext.username,
     topLanguages: githubContext.topLanguages,
@@ -48,24 +47,20 @@ export async function POST(req: NextRequest) {
     })),
   };
 
-  const completion = await openai.chat.completions.create({
-    model: "gpt-4o-mini",
-    response_format: { type: "json_object" },
-    max_tokens: 400,
+  const message = await anthropic.messages.create({
+    model: "claude-haiku-4-5",
+    max_tokens: 600,
+    system:
+      "You are a real-time pitch coach for high-stakes meetings (founders pitching VCs, PMs pitching stakeholders). " +
+      "The transcript uses speaker labels: YOU = the founder/pitcher, THEM = the interviewer/VC. " +
+      "Only analyze YOU lines for hedging and confidence scoring. " +
+      "Use THEM lines (questions/comments) as context to generate relevant talking points from the founder's GitHub work. " +
+      "Return ONLY valid JSON with these fields: " +
+      "hedges (array of hedging phrases found in YOU lines only), " +
+      "scoreDelta (integer based on YOU lines only: negative if weak, positive if confident, range -20 to +10), " +
+      "talkingPoints (array of 1-2 objects with trigger, point, source fields — " +
+      "grounded in their actual GitHub work, triggered by THEM questions, specific and actionable, max 25 words each).",
     messages: [
-      {
-        role: "system",
-        content:
-          "You are a real-time pitch coach for high-stakes meetings (founders pitching VCs, PMs pitching stakeholders). " +
-          "The transcript uses speaker labels: YOU = the founder/pitcher, THEM = the interviewer/VC. " +
-          "Only analyze YOU lines for hedging and confidence scoring. " +
-          "Use THEM lines (questions/comments) as context to generate relevant talking points from the founder's GitHub work. " +
-          "Return ONLY valid JSON with these fields: " +
-          "hedges (array of hedging phrases found in YOU lines only), " +
-          "scoreDelta (integer based on YOU lines only: negative if weak, positive if confident, range -20 to +10), " +
-          "talkingPoints (array of 1-2 objects with trigger, point, source fields — " +
-          "grounded in their actual GitHub work, triggered by THEM questions, specific and actionable, max 25 words each).",
-      },
       {
         role: "user",
         content:
@@ -76,12 +71,16 @@ export async function POST(req: NextRequest) {
     ],
   });
 
-  const raw = completion.choices[0].message.content ?? "{}";
+  const raw =
+    message.content[0].type === "text" ? message.content[0].text : "{}";
 
   let parsed: AnalyzeResponse;
   try {
-    parsed = JSON.parse(raw);
-  } catch {
+    // Extract the first {...} block — handles code fences, preamble text, etc.
+    const match = raw.match(/\{[\s\S]*\}/);
+    parsed = match ? JSON.parse(match[0]) : { hedges: [], scoreDelta: 0, talkingPoints: [] };
+  } catch (e) {
+    console.error("analyze: JSON parse failed", e, "raw:", raw);
     parsed = { hedges: [], scoreDelta: 0, talkingPoints: [] };
   }
 

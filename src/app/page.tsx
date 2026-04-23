@@ -12,7 +12,7 @@ import { useDeepgramTranscription, TranscriptChunk } from "@/hooks/useDeepgramTr
 import { TalkingPoint } from "@/app/api/analyze/route";
 
 const INITIAL_SCORE = 85;
-const ANALYSIS_INTERVAL_MS = 15000;
+const THEM_SILENCE_MS = 1500; // fire analysis this long after "them" stops talking
 
 export default function Home() {
   const [githubContext, setGithubContext] = useState<GitHubContext | null>(null);
@@ -25,16 +25,43 @@ export default function Home() {
   const [chunks, setChunks] = useState<TranscriptChunk[]>([]);
   const [durationSeconds, setDurationSeconds] = useState(0);
   const [sessionActive, setSessionActive] = useState(false);
+  const [activeSpeaker, setActiveSpeaker] = useState<"you" | "them">("you");
 
-  // Accumulate recent transcript for OpenAI analysis (labeled: YOU/THEM)
   const recentBufferRef = useRef<string>("");
-  const analysisTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const themDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const durationTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const activeSpeakerRef = useRef<"you" | "them">("you");
+  activeSpeakerRef.current = activeSpeaker;
+  // Always-current ref so the debounce closure calls the latest runAnalysis
+  const runAnalysisRef = useRef<() => void>(() => {});
+
+  // Space bar toggles speaker while session is active
+  useEffect(() => {
+    if (!sessionActive) return;
+    function onKey(e: KeyboardEvent) {
+      if (e.code === "Space" && e.target === document.body) {
+        e.preventDefault();
+        setActiveSpeaker((s) => (s === "you" ? "them" : "you"));
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [sessionActive]);
+
+  const scheduleAnalysisRef = useRef<() => void>(() => {});
 
   const handleChunk = useCallback((chunk: TranscriptChunk) => {
-    // 1. Instant hedge detection — only on YOUR speech
-    if (chunk.speaker === "you") {
-      const { hedges, scoreDelta } = detectHedges(chunk.text);
+    const overridden: TranscriptChunk = {
+      ...chunk,
+      speaker: activeSpeakerRef.current,
+      highlighted:
+        activeSpeakerRef.current === "you"
+          ? chunk.highlighted
+          : chunk.text,
+    };
+
+    if (overridden.speaker === "you") {
+      const { hedges, scoreDelta } = detectHedges(overridden.text);
       if (hedges.length > 0) {
         setTotalHedges((prev) => prev + hedges.length);
       }
@@ -43,12 +70,15 @@ export default function Home() {
       }
     }
 
-    // 2. Append to rendered transcript
-    setChunks((prev) => [...prev, chunk]);
+    setChunks((prev) => [...prev, overridden]);
 
-    // 3. Accumulate labeled text for OpenAI analysis
-    const label = chunk.speaker === "you" ? "YOU" : "THEM";
-    recentBufferRef.current += `${label}: ${chunk.text}\n`;
+    const label = overridden.speaker === "you" ? "YOU" : "THEM";
+    recentBufferRef.current += `${label}: ${overridden.text}\n`;
+
+    // Debounce analysis trigger on "them" speech
+    if (overridden.speaker === "them") {
+      scheduleAnalysisRef.current();
+    }
   }, []);
 
   const { isListening, error, start, stop } = useDeepgramTranscription(handleChunk);
@@ -76,19 +106,31 @@ export default function Home() {
             return next;
           });
         }
-        if (data.talkingPoints?.length > 0) {
+        if (Array.isArray(data.talkingPoints)) {
           setTalkingPoints(data.talkingPoints);
         }
+      } else {
+        console.error("analyze: HTTP", res.status, await res.text());
       }
-    } catch {
-      // Silent fail — non-critical
+    } catch (e) {
+      console.error("analyze: fetch failed", e);
     } finally {
       setIsAnalyzing(false);
     }
   }, [githubContext]);
 
+  // Keep refs current every render so stale closures always call the latest versions
+  runAnalysisRef.current = runAnalysis;
+  scheduleAnalysisRef.current = () => {
+    if (themDebounceRef.current) clearTimeout(themDebounceRef.current);
+    themDebounceRef.current = setTimeout(() => {
+      runAnalysisRef.current();
+    }, THEM_SILENCE_MS);
+  };
+
   function startSession() {
     setSessionActive(true);
+    setActiveSpeaker("you");
     setScore(INITIAL_SCORE);
     setScoreHistory([INITIAL_SCORE]);
     setTotalHedges(0);
@@ -98,7 +140,6 @@ export default function Home() {
     recentBufferRef.current = "";
     start(selectedDeviceId || undefined);
 
-    analysisTimerRef.current = setInterval(runAnalysis, ANALYSIS_INTERVAL_MS);
     durationTimerRef.current = setInterval(
       () => setDurationSeconds((s) => s + 1),
       1000
@@ -108,14 +149,14 @@ export default function Home() {
   function stopSession() {
     stop();
     setSessionActive(false);
-    if (analysisTimerRef.current) clearInterval(analysisTimerRef.current);
+    if (themDebounceRef.current) clearTimeout(themDebounceRef.current);
     if (durationTimerRef.current) clearInterval(durationTimerRef.current);
-    runAnalysis(); // final analysis
+    runAnalysis();
   }
 
   useEffect(() => {
     return () => {
-      if (analysisTimerRef.current) clearInterval(analysisTimerRef.current);
+      if (themDebounceRef.current) clearTimeout(themDebounceRef.current);
       if (durationTimerRef.current) clearInterval(durationTimerRef.current);
     };
   }, []);
@@ -196,7 +237,12 @@ export default function Home() {
       <div className="grid gap-4" style={{ gridTemplateColumns: "1fr 280px" }}>
         {/* Left column */}
         <div className="flex flex-col gap-4">
-          <TranscriptPanel chunks={chunks} />
+          {sessionActive && (
+            <p className="text-xs" style={{ color: "var(--muted)" }}>
+              Press <kbd style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 4, padding: "0 4px" }}>Space</kbd> to toggle speaker
+            </p>
+          )}
+          <TranscriptPanel chunks={chunks} activeSpeaker={sessionActive ? activeSpeaker : undefined} onToggleSpeaker={sessionActive ? () => setActiveSpeaker((prev) => prev === "you" ? "them" : "you") : undefined} />
           <TalkingPoints points={talkingPoints} isLoading={isAnalyzing} />
         </div>
 

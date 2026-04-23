@@ -25,11 +25,14 @@ async function fetchJson(url: string) {
   return res.json();
 }
 
-export async function buildGitHubContext(username: string): Promise<GitHubContext> {
-  // Fetch top 5 most recently updated public repos
-  const repos = await fetchJson(
-    `https://api.github.com/users/${username}/repos?sort=updated&per_page=5&type=public`
+export async function buildGitHubContext(username: string, selectedRepos?: string[]): Promise<GitHubContext> {
+  const allRepos = await fetchJson(
+    `https://api.github.com/users/${username}/repos?sort=updated&per_page=20&type=public`
   );
+
+  const repos = selectedRepos && selectedRepos.length > 0
+    ? allRepos.filter((r: { name: string }) => selectedRepos.includes(r.name)).slice(0, 5)
+    : allRepos.slice(0, 5);
 
   const repoDetails: GitHubRepo[] = await Promise.all(
     repos.map(async (repo: { name: string; description: string; language: string; stargazers_count: number; html_url: string }) => {
